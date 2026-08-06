@@ -3,6 +3,7 @@ import logging
 import os
 import time
 from flask import Flask, request
+from flask.cli import load_dotenv
 from telegram import Update
 from telegram.constants import ParseMode
 from telegram.ext import (
@@ -16,6 +17,8 @@ from telegram.ext import (
 AWAY_TIMEOUT = 900
 last_owner_activity = 0
 BOT_ENABLED = True
+
+load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 USER_ID_ENV = os.getenv("YOUR_USER_ID")
