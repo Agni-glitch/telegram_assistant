@@ -239,29 +239,7 @@ async def handle_message(
                 await message.reply_text("❌ User information not found.")
 
         return
-
-    # try:
-    #     info_message = await context.bot.send_message(
-    #         chat_id=YOUR_USER_ID,
-    #         text=format_sender_info(sender),
-    #     )
-
-    #     forwarded_message = await context.bot.copy_message(
-    #         chat_id=YOUR_USER_ID,
-    #         from_chat_id=message.chat_id,
-    #         message_id=message.message_id,
-    #     )
-
-    # except Exception as e:
-    #     logger.exception(f"Message forwarding error: {e}")
-
-    #     await message.reply_text(
-    #         "👋 Thanks for reaching out. This is a bot \n\n"
-    #         "I'm currently unavailable, but your message has been noted. "
-    #         "I'll get back to you as soon as possible."
-    #     )
-
-    #     return
+        
     try:
         sender_name = sender.full_name or "Unknown"
         sender_username = f"@{sender.username}" if sender.username else "No username"
@@ -285,10 +263,14 @@ async def handle_message(
 
         print(traceback.format_exc())
 
+        logger.exception(f"Message forwarding error: {e}")
+        
         await message.reply_text(
-            f"Internal server error:\n{e}"
+            "👋 Thanks for reaching out. This is a bot \n\n"
+            "I'm currently unavailable, but your message has been noted. "
+            "I'll get back to you as soon as possible."
         )
-
+        
         return
 
     message_map[forwarded_message.message_id] = sender_id
