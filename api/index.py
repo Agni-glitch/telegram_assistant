@@ -1,9 +1,12 @@
 import asyncio
+import json
 import logging
 import os
 import time
+import urllib.request
+import urllib.error
+
 from flask import Flask, request
-from flask.cli import load_dotenv
 from telegram import Update
 from telegram.constants import ParseMode
 from telegram.ext import (
@@ -15,25 +18,108 @@ from telegram.ext import (
 )
 
 AWAY_TIMEOUT = 900
-last_owner_activity = 0
-BOT_ENABLED = True
-
-load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 USER_ID_ENV = os.getenv("YOUR_USER_ID")
+
+UPSTASH_REDIS_REST_URL = os.getenv("UPSTASH_REDIS_REST_URL")
+UPSTASH_REDIS_REST_TOKEN = os.getenv("UPSTASH_REDIS_REST_TOKEN")
 
 if not BOT_TOKEN or not USER_ID_ENV:
     raise ValueError("BOT_TOKEN or YOUR_USER_ID missing from environment variables.")
 
 YOUR_USER_ID = int(USER_ID_ENV)
 
-# Logging configuration
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Global message tracking map
-message_map = {}
+_mem_last_owner_activity = 0.0
+_mem_bot_enabled = True
+_mem_message_map = {}
+
+REDIS_KEY_LAST_ACTIVITY = "bot:last_owner_activity"
+REDIS_KEY_BOT_ENABLED = "bot:enabled"
+REDIS_KEY_MESSAGE_MAP = "bot:message_map"
+
+def _redis_available() -> bool:
+    return bool(UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN)
+
+
+def _redis_request(path_segments):
+    """
+    Calls the Upstash Redis REST API. path_segments is a list of command
+    parts, e.g. ["GET", "bot:enabled"] or ["SET", "bot:enabled", "1"].
+    Returns the parsed 'result' field, or None on failure.
+    """
+    url = UPSTASH_REDIS_REST_URL.rstrip("/") + "/" + "/".join( # type: ignore
+        urllib.request.quote(str(p), safe="") for p in path_segments # type: ignore
+    )
+    req = urllib.request.Request(
+        url,
+        headers={"Authorization": f"Bearer {UPSTASH_REDIS_REST_TOKEN}"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            return data.get("result")
+    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError) as e:
+        logger.warning(f"Redis request failed ({path_segments[0]}): {e}")
+        return None
+
+
+def get_last_owner_activity() -> float:
+    if _redis_available():
+        result = _redis_request(["GET", REDIS_KEY_LAST_ACTIVITY])
+        return float(result) if result is not None else 0.0
+    return _mem_last_owner_activity
+
+
+def set_last_owner_activity(value: float):
+    global _mem_last_owner_activity
+    if _redis_available():
+        _redis_request(["SET", REDIS_KEY_LAST_ACTIVITY, str(value)])
+    else:
+        _mem_last_owner_activity = value
+
+
+def get_bot_enabled() -> bool:
+    if _redis_available():
+        result = _redis_request(["GET", REDIS_KEY_BOT_ENABLED])
+        if result is None:
+            return True  # default enabled
+        return result == "1"
+    return _mem_bot_enabled
+
+
+def set_bot_enabled(value: bool):
+    global _mem_bot_enabled
+    if _redis_available():
+        _redis_request(["SET", REDIS_KEY_BOT_ENABLED, "1" if value else "0"])
+    else:
+        _mem_bot_enabled = value
+
+
+def get_message_map_entry(message_id: int):
+    if _redis_available():
+        result = _redis_request(["HGET", REDIS_KEY_MESSAGE_MAP, str(message_id)])
+        return int(result) if result is not None else None
+    return _mem_message_map.get(message_id)
+
+
+def set_message_map_entry(message_id: int, user_id: int):
+    if _redis_available():
+        _redis_request(["HSET", REDIS_KEY_MESSAGE_MAP, str(message_id), str(user_id)])
+    else:
+        _mem_message_map[message_id] = user_id
+
+
+def is_owner(user_id: int) -> bool:
+    return user_id == YOUR_USER_ID
+
+
+def is_available() -> bool:
+    return (time.time() - get_last_owner_activity()) < AWAY_TIMEOUT
+
 
 AUTO_REPLY_AVAILABLE = (
     "✅ *Message Received*\n\n"
@@ -49,13 +135,6 @@ AUTO_REPLY_BUSY = (
     "You'll receive a personal reply here directly."
 )
 
-def is_owner(user_id: int) -> bool:
-    return user_id == YOUR_USER_ID
-
-def is_available() -> bool:
-    return (time.time() - last_owner_activity) < AWAY_TIMEOUT
-
-# --- HANDLER FUNCTIONS ---
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "🤖 *Welcome!*\n\n"
@@ -64,6 +143,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     if update.message:
         await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user and is_owner(update.effective_user.id):
@@ -79,25 +159,27 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message:
         await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
+
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status = "🟢 Agni Roybar is available." if is_available() else "🔴 Agni Roybar is currently busy."
     if update.message:
         await update.message.reply_text(status)
 
+
 async def toggle_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global last_owner_activity
     if not update.effective_user or not is_owner(update.effective_user.id):
         return
 
     if is_available():
-        last_owner_activity = 0
+        set_last_owner_activity(0)
         text = "🔴 Status manually set to *Busy*."
     else:
-        last_owner_activity = time.time()
+        set_last_owner_activity(time.time())
         text = "🟢 Status manually set to *Available*."
 
     if update.message:
         await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+
 
 async def faq_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
@@ -107,6 +189,7 @@ async def faq_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     if update.message:
         await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+
 
 async def contact_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
@@ -118,22 +201,22 @@ async def contact_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message:
         await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN_V2)
 
+
 async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global BOT_ENABLED
     if update.effective_user and is_owner(update.effective_user.id):
-        BOT_ENABLED = False
+        set_bot_enabled(False)
         if update.message:
             await update.message.reply_text("🛑 Assistant mode disabled.")
 
+
 async def resume_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global BOT_ENABLED
     if update.effective_user and is_owner(update.effective_user.id):
-        BOT_ENABLED = True
+        set_bot_enabled(True)
         if update.message:
             await update.message.reply_text("✅ Assistant mode enabled.")
 
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global last_owner_activity
     if update.effective_message is None or update.effective_user is None:
         return
 
@@ -141,14 +224,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sender = update.effective_user
     sender_id = sender.id
 
-    if not BOT_ENABLED and not is_owner(sender_id):
+    if not get_bot_enabled() and not is_owner(sender_id):
         return
 
     if is_owner(sender_id):
-        last_owner_activity = time.time()
+        set_last_owner_activity(time.time())
         if message.reply_to_message:
             original_message_id = message.reply_to_message.message_id
-            target_user_id = message_map.get(original_message_id)
+            target_user_id = get_message_map_entry(original_message_id)
 
             if target_user_id:
                 await context.bot.copy_message(
@@ -179,7 +262,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             chat_id=YOUR_USER_ID,
             text=complete_message,
         )
-        message_map[forwarded_message.message_id] = sender_id
+        set_message_map_entry(forwarded_message.message_id, sender_id)
     except Exception as e:
         logger.exception(f"Message forwarding error: {e}")
         await message.reply_text(
@@ -190,7 +273,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     auto_reply = AUTO_REPLY_AVAILABLE if is_available() else AUTO_REPLY_BUSY
     await message.reply_text(auto_reply, parse_mode=ParseMode.MARKDOWN)
 
-# --- BOT BUILDER ---
 telegram_app = Application.builder().token(BOT_TOKEN).build()
 telegram_app.add_handler(CommandHandler("start", start_command))
 telegram_app.add_handler(CommandHandler("help", help_command))
@@ -202,14 +284,15 @@ telegram_app.add_handler(CommandHandler("stop", stop_command))
 telegram_app.add_handler(CommandHandler("resume", resume_command))
 telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-# --- VERCEL FLASK APP SERVER ---
 app = Flask(__name__)
+
 
 async def process_telegram_update(update_json):
     async with telegram_app:
         await telegram_app.initialize()
         update = Update.de_json(update_json, telegram_app.bot)
         await telegram_app.process_update(update)
+
 
 @app.route('/', methods=['POST', 'GET'])
 def webhook():
