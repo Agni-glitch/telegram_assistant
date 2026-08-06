@@ -54,7 +54,7 @@ If the Upstash variables are omitted, the bot still runs, but `last_owner_activi
 ## Local setup
 
 ```bash
-git clone <your-repo-url>
+git clone https://github.com/Agni-glitch/telegram_assistant.git
 cd your-repo
 pip install -r requirements.txt
 ```
@@ -71,7 +71,7 @@ Create a `.env` file locally (not committed) with the same variables listed abov
    git init
    git add .
    git commit -m "Telegram assistant bot"
-   git remote add origin <your-repo-url>
+   git remote add origin https://github.com/Agni-glitch/telegram_assistant.git
    git push -u origin main
    ```
 
