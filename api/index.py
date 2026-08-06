@@ -5,6 +5,7 @@ import os
 import time
 import urllib.request
 import urllib.error
+import urllib.parse
 
 from flask import Flask, request
 from telegram import Update
@@ -17,11 +18,18 @@ from telegram.ext import (
     filters,
 )
 
+# ---------------------------------------------------------------------------
+# CONFIG
+# ---------------------------------------------------------------------------
+
 AWAY_TIMEOUT = 900
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 USER_ID_ENV = os.getenv("YOUR_USER_ID")
 
+# Optional: Upstash Redis REST API, used to persist state across serverless
+# invocations. If these are not set, the bot falls back to in-memory state
+# (which will reset unpredictably between invocations on Vercel).
 UPSTASH_REDIS_REST_URL = os.getenv("UPSTASH_REDIS_REST_URL")
 UPSTASH_REDIS_REST_TOKEN = os.getenv("UPSTASH_REDIS_REST_TOKEN")
 
@@ -33,13 +41,19 @@ YOUR_USER_ID = int(USER_ID_ENV)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# In-memory fallback (used only if Upstash is not configured)
 _mem_last_owner_activity = 0.0
 _mem_bot_enabled = True
 _mem_message_map = {}
 
 REDIS_KEY_LAST_ACTIVITY = "bot:last_owner_activity"
 REDIS_KEY_BOT_ENABLED = "bot:enabled"
-REDIS_KEY_MESSAGE_MAP = "bot:message_map"
+REDIS_KEY_MESSAGE_MAP = "bot:message_map"  # stored as JSON blob: {msg_id: user_id}
+
+
+# ---------------------------------------------------------------------------
+# STATE STORE (Upstash Redis REST, with in-memory fallback)
+# ---------------------------------------------------------------------------
 
 def _redis_available() -> bool:
     return bool(UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN)
@@ -51,8 +65,9 @@ def _redis_request(path_segments):
     parts, e.g. ["GET", "bot:enabled"] or ["SET", "bot:enabled", "1"].
     Returns the parsed 'result' field, or None on failure.
     """
-    url = UPSTASH_REDIS_REST_URL.rstrip("/") + "/" + "/".join( # type: ignore
-        urllib.request.quote(str(p), safe="") for p in path_segments # type: ignore
+    assert UPSTASH_REDIS_REST_URL is not None
+    url = UPSTASH_REDIS_REST_URL.rstrip("/") + "/" + "/".join(
+        urllib.parse.quote(str(p), safe="") for p in path_segments
     )
     req = urllib.request.Request(
         url,
@@ -113,6 +128,10 @@ def set_message_map_entry(message_id: int, user_id: int):
         _mem_message_map[message_id] = user_id
 
 
+# ---------------------------------------------------------------------------
+# HELPERS
+# ---------------------------------------------------------------------------
+
 def is_owner(user_id: int) -> bool:
     return user_id == YOUR_USER_ID
 
@@ -134,6 +153,11 @@ AUTO_REPLY_BUSY = (
     "message has been securely delivered and will be reviewed as soon as possible.\n\n"
     "You'll receive a personal reply here directly."
 )
+
+
+# ---------------------------------------------------------------------------
+# HANDLER FUNCTIONS
+# ---------------------------------------------------------------------------
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
@@ -273,6 +297,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     auto_reply = AUTO_REPLY_AVAILABLE if is_available() else AUTO_REPLY_BUSY
     await message.reply_text(auto_reply, parse_mode=ParseMode.MARKDOWN)
 
+
+# ---------------------------------------------------------------------------
+# BOT BUILDER
+# ---------------------------------------------------------------------------
+
 telegram_app = Application.builder().token(BOT_TOKEN).build()
 telegram_app.add_handler(CommandHandler("start", start_command))
 telegram_app.add_handler(CommandHandler("help", help_command))
@@ -284,12 +313,15 @@ telegram_app.add_handler(CommandHandler("stop", stop_command))
 telegram_app.add_handler(CommandHandler("resume", resume_command))
 telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
+# ---------------------------------------------------------------------------
+# FLASK APP (Vercel entrypoint)
+# ---------------------------------------------------------------------------
+
 app = Flask(__name__)
 
 
 async def process_telegram_update(update_json):
     async with telegram_app:
-        await telegram_app.initialize()
         update = Update.de_json(update_json, telegram_app.bot)
         await telegram_app.process_update(update)
 
