@@ -1,8 +1,8 @@
+import asyncio
 import logging
 import os
 import time
-
-from dotenv import load_dotenv
+from flask import Flask, request
 from telegram import Update
 from telegram.constants import ParseMode
 from telegram.ext import (
@@ -12,48 +12,24 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
-from telegram.request import HTTPXRequest
 
 AWAY_TIMEOUT = 900
-
 last_owner_activity = 0
 BOT_ENABLED = True
-
-load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 USER_ID_ENV = os.getenv("YOUR_USER_ID")
 
-if BOT_TOKEN is None:
-    raise ValueError("BOT_TOKEN is missing.")
-
-if USER_ID_ENV is None:
-    raise ValueError("YOUR_USER_ID is missing.")
+if not BOT_TOKEN or not USER_ID_ENV:
+    raise ValueError("BOT_TOKEN or YOUR_USER_ID missing from environment variables.")
 
 YOUR_USER_ID = int(USER_ID_ENV)
 
-
-class SafeFormatter(logging.Formatter):
-    def format(self, record):
-        message = super().format(record)
-
-        if BOT_TOKEN:
-            message = message.replace(BOT_TOKEN, "********")
-
-        return message
-
-
-handler = logging.StreamHandler()
-handler.setFormatter(
-    SafeFormatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
-)
-
-logging.getLogger().handlers.clear()
-logging.getLogger().addHandler(handler)
-logging.getLogger().setLevel(logging.INFO)
-
+# Logging configuration
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Global message tracking map
 message_map = {}
 
 AUTO_REPLY_AVAILABLE = (
@@ -70,147 +46,91 @@ AUTO_REPLY_BUSY = (
     "You'll receive a personal reply here directly."
 )
 
-
 def is_owner(user_id: int) -> bool:
     return user_id == YOUR_USER_ID
-
 
 def is_available() -> bool:
     return (time.time() - last_owner_activity) < AWAY_TIMEOUT
 
-
-def format_sender_info(user) -> str:
-    name = user.full_name or "Unknown"
-    username = f"@{user.username}" if user.username else "no username"
-    return (
-        f"📩 New Message\n\n"
-        f"From: {name} ({username})\n"
-        f"ID: {user.id}"
-    )
-
-
-async def start_command(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-):
+# --- HANDLER FUNCTIONS ---
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "🤖 *Welcome!*\n\n"
         "I am an AI assistant responding on behalf of Agni Roybar.\n\n"
         "Leave a message here and I will make sure it reaches them directly."
     )
+    if update.message:
+        await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
-    await update.message.reply_text(  # type: ignore
-        text,
-        parse_mode=ParseMode.MARKDOWN,
-    )
-
-
-async def help_command(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-):
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user and is_owner(update.effective_user.id):
         text = (
             "*Available Commands*\n\n"
-            "/start\n"
-            "/help\n"
-            "/status\n"
-            "/toggle\n"
-            "/stop\n"
-            "/resume\n"
-            "/faq\n"
-            "/contact"
+            "/start\n/help\n/status\n/toggle\n/stop\n/resume\n/faq\n/contact"
         )
     else:
         text = (
             "*Available Commands*\n\n"
-            "/start\n"
-            "/help\n"
-            "/status\n"
-            "/faq\n"
-            "/contact"
+            "/start\n/help\n/status\n/faq\n/contact"
         )
+    if update.message:
+        await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
-    await update.message.reply_text(  # type: ignore
-        text,
-        parse_mode=ParseMode.MARKDOWN,
-    )
+async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    status = "🟢 Agni Roybar is available." if is_available() else "🔴 Agni Roybar is currently busy."
+    if update.message:
+        await update.message.reply_text(status)
 
-
-async def status_command(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-):
-    if is_available():
-        status = "🟢 Agni Roybar is available."
-    else:
-        status = "🔴 Agni Roybar is currently busy."
-
-    await update.message.reply_text(status)  # type: ignore
-
-
-async def toggle_status_command(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-):
+async def toggle_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global last_owner_activity
-
     if not update.effective_user or not is_owner(update.effective_user.id):
         return
 
     if is_available():
         last_owner_activity = 0
-        await update.message.reply_text(  # type: ignore
-            "🔴 Status manually set to *Busy*.",
-            parse_mode=ParseMode.MARKDOWN,
-        )
+        text = "🔴 Status manually set to *Busy*."
     else:
         last_owner_activity = time.time()
-        await update.message.reply_text(  # type: ignore
-            "🟢 Status manually set to *Available*.",
-            parse_mode=ParseMode.MARKDOWN,
-        )
+        text = "🟢 Status manually set to *Available*."
 
+    if update.message:
+        await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
-async def faq_command(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-):
+async def faq_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "*Frequently Asked Questions*\n\n"
         "📌 Response time: Usually a few hours.\n\n"
         "📌 Messages are forwarded directly."
     )
+    if update.message:
+        await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
-    await update.message.reply_text(  # type: ignore
-        text,
-        parse_mode=ParseMode.MARKDOWN,
-    )
-
-
-async def contact_command(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-):
+async def contact_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "*Alternative contacts*\n\n"
         "📧 Email: agniroybar@gmail\\.com\n"
         "💼 LinkedIn:\n"
         "linkedin\\.com/in/agni\\-roybar\\-6600983b0"
     )
+    if update.message:
+        await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN_V2)
 
-    await update.message.reply_text(  # type: ignore
-        text,
-        parse_mode=ParseMode.MARKDOWN_V2,
-    )
+async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global BOT_ENABLED
+    if update.effective_user and is_owner(update.effective_user.id):
+        BOT_ENABLED = False
+        if update.message:
+            await update.message.reply_text("🛑 Assistant mode disabled.")
 
+async def resume_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global BOT_ENABLED
+    if update.effective_user and is_owner(update.effective_user.id):
+        BOT_ENABLED = True
+        if update.message:
+            await update.message.reply_text("✅ Assistant mode enabled.")
 
-async def handle_message(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-):
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global last_owner_activity
-
     if update.effective_message is None or update.effective_user is None:
         return
 
@@ -223,7 +143,6 @@ async def handle_message(
 
     if is_owner(sender_id):
         last_owner_activity = time.time()
-
         if message.reply_to_message:
             original_message_id = message.reply_to_message.message_id
             target_user_id = message_map.get(original_message_id)
@@ -237,9 +156,8 @@ async def handle_message(
                 await message.reply_text("✅ Reply delivered.")
             else:
                 await message.reply_text("❌ User information not found.")
-
         return
-        
+
     try:
         sender_name = sender.full_name or "Unknown"
         sender_username = f"@{sender.username}" if sender.username else "No username"
@@ -258,109 +176,42 @@ async def handle_message(
             chat_id=YOUR_USER_ID,
             text=complete_message,
         )
+        message_map[forwarded_message.message_id] = sender_id
     except Exception as e:
-        import traceback
-
-        print(traceback.format_exc())
-
         logger.exception(f"Message forwarding error: {e}")
-        
         await message.reply_text(
-            "👋 Thanks for reaching out. This is a bot \n\n"
-            "I'm currently unavailable, but your message has been noted. "
-            "I'll get back to you as soon as possible."
+            "👋 Thanks for reaching out. I'm currently unavailable, but your message has been noted."
         )
-        
         return
-
-    message_map[forwarded_message.message_id] = sender_id
 
     auto_reply = AUTO_REPLY_AVAILABLE if is_available() else AUTO_REPLY_BUSY
+    await message.reply_text(auto_reply, parse_mode=ParseMode.MARKDOWN)
 
-    await message.reply_text(
-        auto_reply,
-        parse_mode=ParseMode.MARKDOWN,
-    )
+# --- BOT BUILDER ---
+telegram_app = Application.builder().token(BOT_TOKEN).build()
+telegram_app.add_handler(CommandHandler("start", start_command))
+telegram_app.add_handler(CommandHandler("help", help_command))
+telegram_app.add_handler(CommandHandler("status", status_command))
+telegram_app.add_handler(CommandHandler("toggle", toggle_status_command))
+telegram_app.add_handler(CommandHandler("faq", faq_command))
+telegram_app.add_handler(CommandHandler("contact", contact_command))
+telegram_app.add_handler(CommandHandler("stop", stop_command))
+telegram_app.add_handler(CommandHandler("resume", resume_command))
+telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-async def stop_command(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-):
-    global BOT_ENABLED
+# --- VERCEL FLASK APP SERVER ---
+app = Flask(__name__)
 
-    if not update.effective_user:
-        return
+async def process_telegram_update(update_json):
+    async with telegram_app:
+        await telegram_app.initialize()
+        update = Update.de_json(update_json, telegram_app.bot)
+        await telegram_app.process_update(update)
 
-    if not is_owner(update.effective_user.id):
-        return
-
-    BOT_ENABLED = False
-
-    await update.message.reply_text( # type: ignore
-        "🛑 Assistant mode disabled."
-    )
-
-async def resume_command(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-):
-    global BOT_ENABLED
-
-    if not update.effective_user:
-        return
-
-    if not is_owner(update.effective_user.id):
-        return
-
-    BOT_ENABLED = True
-
-    await update.message.reply_text( # type: ignore
-        "✅ Assistant mode enabled."
-    )
-
-async def error_handler(
-    update: object,
-    context: ContextTypes.DEFAULT_TYPE,
-):
-    logger.exception("Unexpected error occurred.")
-
-
-def main():
-
-    request = HTTPXRequest(
-        connect_timeout=30,
-        read_timeout=30,
-    )
-
-    app = (
-        Application.builder()
-        .token(BOT_TOKEN)  # type: ignore
-        .request(request)
-        .build()
-    )
-
-    app.add_handler(CommandHandler("start", start_command))
-    app.add_handler(CommandHandler("help", help_command))
-    app.add_handler(CommandHandler("status", status_command))
-    app.add_handler(CommandHandler("toggle", toggle_status_command))
-    app.add_handler(CommandHandler("faq", faq_command))
-    app.add_handler(CommandHandler("contact", contact_command))
-    app.add_handler(CommandHandler("stop", stop_command))
-    app.add_handler(CommandHandler("resume", resume_command))
-
-    app.add_handler(
-        MessageHandler(
-            filters.TEXT & ~filters.COMMAND,
-            handle_message,
-        )
-    )
-
-    app.add_error_handler(error_handler)
-
-    print("Bot is running...")
-
-    app.run_polling()
-
-
-if __name__ == "__main__":
-    main()
+@app.route('/', methods=['POST', 'GET'])
+def webhook():
+    if request.method == 'POST':
+        update_data = request.get_json(force=True)
+        asyncio.run(process_telegram_update(update_data))
+        return "OK", 200
+    return "Bot running on Vercel Serverless!", 200
