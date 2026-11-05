@@ -4,33 +4,48 @@ Pluggable AI model layer.
 Models are configured with a comma-separated list of "provider:model" entries,
 tried in order until one succeeds, e.g.
 
-    AI_MODELS=anthropic:claude-opus-5-5,groq:llama-3.3-70b-versatile
+    AI_MODELS=anthropic:claude-opus-5-5,azure:IPMgpt-4,groq:llama-3.3-70b-versatile
 
-Built-in providers are listed in PROVIDERS below. Any other provider name works
-too, as long as it speaks the OpenAI-compatible /chat/completions API: set
-<NAME>_BASE_URL and <NAME>_API_KEY, e.g. "ollama:llama3" with OLLAMA_BASE_URL.
+Set it in Vercel (AI_MODELS / OWNER_AI_MODELS) or from Telegram with /model.
+
+- Built-in providers (PROVIDERS below) only need their API key env var.
+- Any other OpenAI-compatible provider: pick a name and set <NAME>_BASE_URL
+  and <NAME>_API_KEY. If it expects the key in a header other than
+  "Authorization: Bearer", set <NAME>_API_KEY_HEADER (e.g. "api-key").
+- <NAME>_BASE_URL also overrides a built-in provider's URL (e.g. a proxy).
 """
 
 import json
 import logging
 import os
 import urllib.error
+import urllib.parse
 import urllib.request
 
 logger = logging.getLogger(__name__)
 
 AI_TIMEOUT = float(os.getenv("AI_TIMEOUT", "25"))
 
-# provider name -> (OpenAI-compatible base URL or "anthropic", API key env var)
+# provider name -> (base URL, or "anthropic"/"azure" for native APIs, API key env var)
 PROVIDERS = {
     "anthropic": ("anthropic", "ANTHROPIC_API_KEY"),
+    # Azure OpenAI: model = your DEPLOYMENT name, e.g. azure:IPMgpt-4.
+    # Also needs AZURE_OPENAI_ENDPOINT (and optionally AZURE_OPENAI_API_VERSION).
+    "azure": ("azure", "AZURE_OPENAI_API_KEY"),
     "openai": ("https://api.openai.com/v1", "OPENAI_API_KEY"),
+    "gemini": ("https://generativelanguage.googleapis.com/v1beta/openai", "GEMINI_API_KEY"),
     "groq": ("https://api.groq.com/openai/v1", "GROQ_API_KEY"),
     "openrouter": ("https://openrouter.ai/api/v1", "OPENROUTER_API_KEY"),
-    "gemini": ("https://generativelanguage.googleapis.com/v1beta/openai", "GEMINI_API_KEY"),
     "deepseek": ("https://api.deepseek.com/v1", "DEEPSEEK_API_KEY"),
     "mistral": ("https://api.mistral.ai/v1", "MISTRAL_API_KEY"),
     "together": ("https://api.together.xyz/v1", "TOGETHER_API_KEY"),
+    "xai": ("https://api.x.ai/v1", "XAI_API_KEY"),
+    "perplexity": ("https://api.perplexity.ai", "PERPLEXITY_API_KEY"),
+    "cerebras": ("https://api.cerebras.ai/v1", "CEREBRAS_API_KEY"),
+    "fireworks": ("https://api.fireworks.ai/inference/v1", "FIREWORKS_API_KEY"),
+    "huggingface": ("https://router.huggingface.co/v1", "HUGGINGFACE_API_KEY"),
+    "nvidia": ("https://integrate.api.nvidia.com/v1", "NVIDIA_API_KEY"),
+    "cohere": ("https://api.cohere.ai/compatibility/v1", "COHERE_API_KEY"),
 }
 
 # Claude models that support server-side refusal fallbacks.
@@ -53,26 +68,53 @@ def parse_models(spec: str | None) -> list[tuple[str, str]]:
     return models
 
 
-def _resolve(provider: str) -> tuple[str, str | None]:
+def _env_prefix(provider: str) -> str:
+    return provider.upper().replace("-", "_")
+
+
+def _resolve(provider: str) -> dict:
+    """Returns {"kind", "base", "key", "header"}; raises AIError if unusable."""
+    prefix = _env_prefix(provider)
+    base_override = os.getenv(f"{prefix}_BASE_URL")
+    header = os.getenv(f"{prefix}_API_KEY_HEADER")
+
     if provider in PROVIDERS:
         base, key_env = PROVIDERS[provider]
-        return base, os.getenv(key_env)
-    prefix = provider.upper().replace("-", "_")
-    base = os.getenv(f"{prefix}_BASE_URL")
-    if not base:
-        raise AIError(f"unknown provider '{provider}' (set {prefix}_BASE_URL)")
-    return base, os.getenv(f"{prefix}_API_KEY")
+        key = os.getenv(key_env)
+        if not key:
+            raise AIError(f"{provider}: {key_env} is not set in Vercel")
+        if base == "anthropic":
+            return {"kind": "anthropic", "key": key}
+        if base == "azure":
+            if not os.getenv("AZURE_OPENAI_ENDPOINT"):
+                raise AIError("azure: AZURE_OPENAI_ENDPOINT is not set in Vercel")
+            return {"kind": "azure", "key": key}
+        return {"kind": "openai", "base": base_override or base, "key": key, "header": header}
+
+    if not base_override:
+        raise AIError(f"unknown provider '{provider}' (set {prefix}_BASE_URL and {prefix}_API_KEY in Vercel)")
+    return {"kind": "openai", "base": base_override, "key": os.getenv(f"{prefix}_API_KEY"), "header": header}
 
 
 def check_provider(provider: str) -> str | None:
     """Return a problem description if this provider can't be used, else None."""
     try:
-        _, key = _resolve(provider)
+        _resolve(provider)
     except AIError as e:
         return str(e)
-    if provider in PROVIDERS and not key:
-        return f"{provider}: {PROVIDERS[provider][1]} is not set in Vercel"
     return None
+
+
+def ready_providers() -> list[str]:
+    """Providers that are configured in the environment and usable right now."""
+    names = list(PROVIDERS)
+    reserved = {_env_prefix(p) for p in PROVIDERS} | {"AZURE_OPENAI", "ANTHROPIC"}
+    for var in os.environ:
+        if var.endswith("_BASE_URL") and os.environ[var]:
+            prefix = var[: -len("_BASE_URL")]
+            if prefix and prefix not in reserved:
+                names.append(prefix.lower())
+    return [n for n in names if check_provider(n) is None]
 
 
 def _call_anthropic(api_key: str, model: str, system: str, user_text: str) -> str:
@@ -106,7 +148,28 @@ def _call_anthropic(api_key: str, model: str, system: str, user_text: str) -> st
     return text
 
 
-def _call_openai_compatible(base_url: str, api_key: str | None, model: str, system: str, user_text: str) -> str:
+def _call_azure(api_key: str, deployment: str, system: str, user_text: str) -> str:
+    endpoint = os.getenv("AZURE_OPENAI_ENDPOINT", "").rstrip("/")
+    version = os.getenv("AZURE_OPENAI_API_VERSION", "2024-12-01-preview")
+    url = (
+        f"{endpoint}/openai/deployments/{urllib.parse.quote(deployment, safe='')}"
+        f"/chat/completions?api-version={urllib.parse.quote(version, safe='')}"
+    )
+    return _chat_completions(url, {"api-key": api_key}, deployment, system, user_text)
+
+
+def _call_openai_compatible(base_url: str, api_key: str | None, header: str | None,
+                            model: str, system: str, user_text: str) -> str:
+    if not api_key:
+        auth = {}
+    elif header and header.lower() != "authorization":
+        auth = {header: api_key}
+    else:
+        auth = {"Authorization": f"Bearer {api_key}"}
+    return _chat_completions(base_url.rstrip("/") + "/chat/completions", auth, model, system, user_text)
+
+
+def _chat_completions(url: str, auth_headers: dict, model: str, system: str, user_text: str) -> str:
     body = json.dumps({
         "model": model,
         "messages": [
@@ -114,10 +177,8 @@ def _call_openai_compatible(base_url: str, api_key: str | None, model: str, syst
             {"role": "user", "content": user_text},
         ],
     }).encode("utf-8")
-    headers = {"Content-Type": "application/json"}
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
-    req = urllib.request.Request(base_url.rstrip("/") + "/chat/completions", data=body, headers=headers)
+    headers = {"Content-Type": "application/json", **auth_headers}
+    req = urllib.request.Request(url, data=body, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=AI_TIMEOUT) as resp:
             data = json.loads(resp.read().decode("utf-8"))
@@ -133,6 +194,15 @@ def _call_openai_compatible(base_url: str, api_key: str | None, model: str, syst
     return text
 
 
+def call_model(provider: str, model: str, system: str, user_text: str) -> str:
+    cfg = _resolve(provider)
+    if cfg["kind"] == "anthropic":
+        return _call_anthropic(cfg["key"], model, system, user_text)
+    if cfg["kind"] == "azure":
+        return _call_azure(cfg["key"], model, system, user_text)
+    return _call_openai_compatible(cfg["base"], cfg["key"], cfg["header"], model, system, user_text)
+
+
 def generate(models: list[tuple[str, str]], system: str, user_text: str) -> tuple[str, str]:
     """Try each model in order. Returns (reply_text, "provider:model"). Raises AIError if all fail."""
     if not models:
@@ -141,12 +211,7 @@ def generate(models: list[tuple[str, str]], system: str, user_text: str) -> tupl
     for provider, model in models:
         label = f"{provider}:{model}"
         try:
-            base, key = _resolve(provider)
-            if base == "anthropic":
-                if not key:
-                    raise AIError("ANTHROPIC_API_KEY not set")
-                return _call_anthropic(key, model, system, user_text), label
-            return _call_openai_compatible(base, key, model, system, user_text), label
+            return call_model(provider, model, system, user_text), label
         except Exception as e:  # try the next model on any failure
             logger.warning(f"AI model {label} failed: {e}")
             errors.append(f"{label}: {e}")

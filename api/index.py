@@ -239,6 +239,7 @@ OWNER_HELP = (
     "/available - short acknowledgement, you reply yourself\n"
     "/status - current mode and models\n"
     "/model <provider:model,...> - set models (both), or /model others ... / /model me ...\n"
+    "/model test - check every configured model responds\n"
     "/model reset - back to the models set in Vercel\n"
     "/aireply <instructions> - reply to a notification with this to let the AI answer that person\n\n"
     "Reply to a notification to answer that person directly.\n"
@@ -283,6 +284,24 @@ def mode_command(mode: str):
     return handler
 
 
+async def model_test(msg: Message, others: list, mine: list):
+    unique = list(dict.fromkeys(others + mine))
+    if not unique:
+        await msg.reply_text("No models configured.")
+        return
+    await msg.reply_text(f"Testing {len(unique)} model(s)…")
+
+    async def ping(provider, model):
+        try:
+            await asyncio.to_thread(llm.call_model, provider, model, "Reply with the single word OK.", "ping")
+            return f"✅ {provider}:{model}"
+        except Exception as e:
+            return f"❌ {provider}:{model}: {clip(str(e), 300)}"
+
+    results = await asyncio.gather(*(ping(p, m) for p, m in unique))
+    await msg.reply_text(clip("\n".join(results)))
+
+
 async def model_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Owner only: /model, /model <spec>, /model others <spec>, /model me <spec>, /model reset."""
     if not is_owner(update.effective_user):
@@ -297,9 +316,16 @@ async def model_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Models for you: {fmt_models(owner_models(s))}{'' if s['me'] else ' (default)'}\n\n"
             f"Change: /model provider:model[,provider:model...]\n"
             f"Only one side: /model others ... or /model me ...\n"
+            f"Check they work: /model test\n"
             f"Undo: /model reset\n\n"
-            f"Providers: {', '.join(llm.PROVIDERS)} (or any with <NAME>_BASE_URL set)"
+            f"Ready providers (key set in Vercel): {', '.join(llm.ready_providers()) or 'none'}\n"
+            f"Other built-in providers need their API key in Vercel; any other "
+            f"OpenAI-compatible provider needs <NAME>_BASE_URL + <NAME>_API_KEY."
         )
+        return
+
+    if args[0].lower() == "test":
+        await model_test(msg, others_models(s), owner_models(s))
         return
 
     target = "both"
