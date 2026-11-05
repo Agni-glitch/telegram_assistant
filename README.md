@@ -1,115 +1,92 @@
 # Telegram Assistant Bot
 
-A Telegram bot that acts as an AI-assistant-style front desk for a single owner: it receives messages from other users, forwards them to the owner, sends an automatic "message received" reply, and lets the owner reply directly through Telegram (their reply gets routed back to the original sender). Deployed as a Python serverless function on Vercel.
+A personal Telegram assistant for one owner, hosted on Vercel, **with no database**.
 
-## Features
+- **People message the bot** → it replies on your behalf with an AI model (or a hard-coded message when the AI is off or fails).
+- **You get a notification** for every message: who sent it (name, username, ID), when, what they said, and what the bot replied.
+- **Reply to a notification** → your reply (text, photo, voice, anything) goes to that person.
+- **Reply with `/aireply <instructions>`** → the AI writes and sends the reply for you, e.g. `/aireply say I'll call tomorrow evening`.
+- **Message the bot yourself** → you chat with the AI model directly.
 
-- Forwards incoming messages from any user to the owner's Telegram account
-- Auto-reply to senders, with different copy depending on whether the owner is "available" or "busy" (based on recent activity)
-- Owner can reply to a forwarded message and have it routed back to the original sender
-- Owner-only commands to toggle availability and enable/disable the bot entirely
-- `/faq` and `/contact` commands for senders
-- Optional persistent state (owner activity, enabled/disabled flag, sender reply-routing map) via Upstash Redis, so state survives across serverless invocations
+## Why no database is needed
+
+| What needs remembering | How it works without a DB |
+|---|---|
+| Who to send your reply to | The sender's ID is written in each notification (`🆔 ID: …`). Replying to it tells the bot who to send to. |
+| Assistant mode (`ai` / `away` / `available`) | Stored as a **pinned message** in your chat with the bot. Don't unpin it. |
+| Conversation context | None is stored. Each message is answered on its own, plus the message it replies to (if any). |
+
+## Modes
+
+| Command | What people get |
+|---|---|
+| `/ai` | An AI reply on your behalf. If every model fails, they get the hard-coded away message. |
+| `/away` | The hard-coded "unavailable" message only. |
+| `/available` | A short "you've been notified" acknowledgement. You reply yourself. |
+
+`DEFAULT_MODE` applies until you pick one. `/status` shows the current mode and models.
+
+## Adding models
+
+Set `AI_MODELS` to a comma-separated list of `provider:model` entries. They are tried in order, and the next one is used if one fails:
+
+```
+AI_MODELS=anthropic:claude-opus-5-5,groq:llama-3.3-70b-versatile,gemini:gemini-2.5-flash
+```
+
+Built-in providers, each with its own key variable: `anthropic` (`ANTHROPIC_API_KEY`), `openai`, `groq`, `gemini`, `openrouter`, `deepseek`, `mistral`, `together` (`<PROVIDER>_API_KEY`).
+
+**Any other OpenAI-compatible provider** works with no code change. Pick a name, then set `<NAME>_BASE_URL` and `<NAME>_API_KEY`:
+
+```
+AI_MODELS=ollama:llama3
+OLLAMA_BASE_URL=https://my-ollama.example.com/v1
+```
+
+To use different models for your own chat than for replying to others, set `OWNER_AI_MODELS`.
+
+### Switching models from Telegram (owner only)
+
+You can change models from your chat with the bot, with no redeploy. These are the commands, and anyone else who sends them is ignored:
+
+| Command | Effect |
+|---|---|
+| `/model` | Show the models in use |
+| `/model groq:llama-3.3-70b-versatile` | Use this for both replies to others and your chat |
+| `/model others anthropic:claude-haiku-5-5` | Only for replies to others |
+| `/model me gemini:gemini-2.5-flash,groq:llama-3.3-70b-versatile` | Only for your chat (with a fallback) |
+| `/model reset` | Back to `AI_MODELS` / `OWNER_AI_MODELS` from Vercel |
+
+The provider's API key must already be set in Vercel. The bot refuses a model whose key is missing. The choice is saved in the same pinned settings message as the mode. Cheaper Claude option: `anthropic:claude-haiku-5-5`.
+
+`OWNER_ABOUT` is what the AI is allowed to tell people about you (work, response times, links). The AI is told never to invent facts or make commitments for you.
+
+## Environment variables
+
+See [.env.example](.env.example) for the full list. Required: `BOT_TOKEN`, `YOUR_USER_ID`, `WEBHOOK_SECRET`, plus at least one model and its API key if you want AI replies.
+
+In Vercel, enable each variable for **Production**. **Redeploy after changing variables.**
+
+## Deploy to Vercel
+
+1. Push this repo to GitHub, then import it in Vercel (Framework Preset: `Other`, leave build settings empty).
+2. Add the environment variables, then deploy.
+3. Open `https://<your-project>.vercel.app/setup?key=<WEBHOOK_SECRET>` once. This sets the Telegram webhook (with the secret) and the bot's command menu.
+4. Send `/start` to the bot from your account, then `/ai` (or `/away` / `/available`) to set the mode.
+5. Message the bot from another account to test.
 
 ## Project structure
 
 ```
-your-repo/
-├── api/
-│   └── index.py       # Flask app + Telegram bot logic (Vercel entrypoint)
-├── requirements.txt
-└── vercel.json
+api/index.py     Flask webhook + Telegram handlers (Vercel entrypoint)
+api/llm.py       Pluggable model providers with fallback
+requirements.txt
+vercel.json      Routes everything to api/index.py, 60s max duration
 ```
-
-## Commands
-
-| Command | Who | Description |
-|---|---|---|
-| `/start` | Everyone | Welcome message |
-| `/help` | Everyone | Lists available commands (owner sees extra commands) |
-| `/status` | Everyone | Shows whether the owner is currently available |
-| `/faq` | Everyone | Frequently asked questions |
-| `/contact` | Everyone | Alternative contact info |
-| `/toggle` | Owner only | Manually flips available/busy status |
-| `/stop` | Owner only | Disables the bot (non-owner messages are ignored) |
-| `/resume` | Owner only | Re-enables the bot |
-
-To reply to a forwarded message, the owner replies (Telegram "reply") to the forwarded message in their own chat with the bot — the bot routes it back to the original sender automatically.
-
-## Environment variables
-
-Set these in **Vercel → Project → Settings → Environment Variables**, and make sure each one is enabled for the **Production** environment (and Preview/Development if you test there) — variables saved only under Development will not be available to the deployed function.
-
-| Variable | Required | Description |
-|---|---|---|
-| `BOT_TOKEN` | Yes | Telegram bot token from [@BotFather](https://t.me/BotFather) |
-| `YOUR_USER_ID` | Yes | Your numeric Telegram user ID (e.g. from [@userinfobot](https://t.me/userinfobot)) |
-| `UPSTASH_REDIS_REST_URL` | No | Upstash Redis REST URL, for persistent state across invocations |
-| `UPSTASH_REDIS_REST_TOKEN` | No | Upstash Redis REST token |
-
-If the Upstash variables are omitted, the bot still runs, but `last_owner_activity`, the enabled/disabled flag, and the reply-routing map are held in memory only and may reset unpredictably between serverless invocations.
-
-**Important:** after adding or changing environment variables in Vercel, you must trigger a new deployment (redeploy or push a commit) — existing deployments do not pick up variable changes retroactively.
-
-## Local setup
-
-```bash
-git clone https://github.com/Agni-glitch/telegram_assistant.git
-cd your-repo
-pip install -r requirements.txt
-```
-
-Create a `.env` file locally (not committed) with the same variables listed above, for local testing.
-
-## Deploying to Vercel
-
-1. **Set up Upstash Redis (optional, recommended)**
-   Create a free database at [upstash.com](https://upstash.com) and copy the REST URL and REST token from the dashboard.
-
-2. **Push to GitHub**
-   ```bash
-   git init
-   git add .
-   git commit -m "Telegram assistant bot"
-   git remote add origin https://github.com/Agni-glitch/telegram_assistant.git
-   git push -u origin main
-   ```
-
-3. **Import into Vercel**
-   Go to [vercel.com](https://vercel.com) → Add New Project → import the repo.
-
-4. **Add environment variables** (see table above) under Project Settings, then deploy.
-
-5. **Build & Development Settings** (Project Settings → Build & Development Settings):
-
-   | Setting | Value |
-   |---|---|
-   | Framework Preset | `Other` |
-   | Build Command | leave empty |
-   | Output Directory | leave empty |
-   | Install Command | leave empty (auto-detected from `requirements.txt`) |
-   | Root Directory | `./` |
-
-   `vercel.json` handles the actual build via the `@vercel/python` runtime, so the dashboard build settings don't apply here.
-
-6. **Set the Telegram webhook** once deployed:
-   ```bash
-   curl -F "url=https://your-project.vercel.app/" https://api.telegram.org/bot<BOT_TOKEN>/setWebhook
-   ```
-   Replace `<BOT_TOKEN>` with your actual token. A successful response looks like `{"ok":true,"result":true,...}`.
-
-7. **Verify**
-   - Visiting `https://your-project.vercel.app/` in a browser should return `Bot running on Vercel Serverless!`
-   - Message the bot from a non-owner account — you should receive the auto-reply, and the message should be forwarded to the owner's chat.
 
 ## Troubleshooting
 
-- **`FUNCTION_INVOCATION_FAILED` / 500 on every request, including `/favicon.ico`:** check Vercel's Logs tab. `could not import "api/index.py"` at the top of the traceback means the module failed at import time — almost always missing or misconfigured environment variables (see above). A crash referencing a specific handler function instead means the bug is inside request-handling logic, not configuration.
-- **`/toggle`, `/stop`, `/resume` behave inconsistently:** confirm `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN` are set — without them, state is in-memory only and resets across serverless invocations.
-- **Webhook not receiving updates:** re-run the `setWebhook` curl command against your current deployment URL — Vercel's production URL can change if you're pointing at a preview deployment instead of production.
-
-## Notes on Vercel's Python runtime
-
-- The `api/index.py` file exports a Flask app named `app`, which `@vercel/python` auto-detects as a WSGI application.
-- `vercel.json` uses the `builds`/`routes` schema to route all paths to `api/index.py`. An equivalent `functions`/`rewrites` schema also works — don't mix both styles in the same file.
-- Global Python state (module-level variables) may or may not persist between requests depending on whether Vercel reuses a "warm" instance — don't rely on it for anything that needs to be correct across requests; use Redis (or another external store) instead.
+- **Notifications arrive but people get the hard-coded message in `/ai` mode:** the notification shows `hard-coded, AI failed: …` with the reason, usually a missing key or a wrong model ID.
+- **403 on webhook calls:** `WEBHOOK_SECRET` changed. Open `/setup?key=…` again.
+- **Mode resets:** the pinned "Assistant mode" message was unpinned. Run `/ai`, `/away` or `/available` again.
+- **`could not import "api/index.py"` in Vercel logs:** `BOT_TOKEN` or `YOUR_USER_ID` is missing for that environment.
