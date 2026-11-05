@@ -36,6 +36,8 @@ AI_MODELS=anthropic:claude-opus-5-5,groq:llama-3.3-70b-versatile,gemini:gemini-2
 
 Built-in providers, each with its own key variable: `anthropic` (`ANTHROPIC_API_KEY`), `openai`, `groq`, `gemini`, `openrouter`, `deepseek`, `mistral`, `together` (`<PROVIDER>_API_KEY`).
 
+**Azure OpenAI**: set `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_API_KEY` and optionally `AZURE_OPENAI_API_VERSION` (default `2024-12-01-preview`). Then use your **deployment name** as the model, e.g. `AI_MODELS=azure:IPMgpt-4`.
+
 **Any other OpenAI-compatible provider** works with no code change. Pick a name, then set `<NAME>_BASE_URL` and `<NAME>_API_KEY`:
 
 ```

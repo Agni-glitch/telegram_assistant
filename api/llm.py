@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import urllib.error
+import urllib.parse
 import urllib.request
 
 logger = logging.getLogger(__name__)
@@ -24,6 +25,9 @@ AI_TIMEOUT = float(os.getenv("AI_TIMEOUT", "25"))
 # provider name -> (OpenAI-compatible base URL or "anthropic", API key env var)
 PROVIDERS = {
     "anthropic": ("anthropic", "ANTHROPIC_API_KEY"),
+    # Azure OpenAI: model = your DEPLOYMENT name, e.g. azure:IPMgpt-4.
+    # Also needs AZURE_OPENAI_ENDPOINT (and optionally AZURE_OPENAI_API_VERSION).
+    "azure": ("azure", "AZURE_OPENAI_API_KEY"),
     "openai": ("https://api.openai.com/v1", "OPENAI_API_KEY"),
     "groq": ("https://api.groq.com/openai/v1", "GROQ_API_KEY"),
     "openrouter": ("https://openrouter.ai/api/v1", "OPENROUTER_API_KEY"),
@@ -72,6 +76,8 @@ def check_provider(provider: str) -> str | None:
         return str(e)
     if provider in PROVIDERS and not key:
         return f"{provider}: {PROVIDERS[provider][1]} is not set in Vercel"
+    if provider == "azure" and not os.getenv("AZURE_OPENAI_ENDPOINT"):
+        return "azure: AZURE_OPENAI_ENDPOINT is not set in Vercel"
     return None
 
 
@@ -106,7 +112,24 @@ def _call_anthropic(api_key: str, model: str, system: str, user_text: str) -> st
     return text
 
 
+def _call_azure(api_key: str, deployment: str, system: str, user_text: str) -> str:
+    endpoint = os.getenv("AZURE_OPENAI_ENDPOINT", "").rstrip("/")
+    if not endpoint:
+        raise AIError("AZURE_OPENAI_ENDPOINT not set")
+    version = os.getenv("AZURE_OPENAI_API_VERSION", "2024-12-01-preview")
+    url = (
+        f"{endpoint}/openai/deployments/{urllib.parse.quote(deployment, safe='')}"
+        f"/chat/completions?api-version={urllib.parse.quote(version, safe='')}"
+    )
+    return _chat_completions(url, {"api-key": api_key}, deployment, system, user_text)
+
+
 def _call_openai_compatible(base_url: str, api_key: str | None, model: str, system: str, user_text: str) -> str:
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    return _chat_completions(base_url.rstrip("/") + "/chat/completions", headers, model, system, user_text)
+
+
+def _chat_completions(url: str, auth_headers: dict, model: str, system: str, user_text: str) -> str:
     body = json.dumps({
         "model": model,
         "messages": [
@@ -114,10 +137,8 @@ def _call_openai_compatible(base_url: str, api_key: str | None, model: str, syst
             {"role": "user", "content": user_text},
         ],
     }).encode("utf-8")
-    headers = {"Content-Type": "application/json"}
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
-    req = urllib.request.Request(base_url.rstrip("/") + "/chat/completions", data=body, headers=headers)
+    headers = {"Content-Type": "application/json", **auth_headers}
+    req = urllib.request.Request(url, data=body, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=AI_TIMEOUT) as resp:
             data = json.loads(resp.read().decode("utf-8"))
@@ -146,6 +167,10 @@ def generate(models: list[tuple[str, str]], system: str, user_text: str) -> tupl
                 if not key:
                     raise AIError("ANTHROPIC_API_KEY not set")
                 return _call_anthropic(key, model, system, user_text), label
+            if base == "azure":
+                if not key:
+                    raise AIError("AZURE_OPENAI_API_KEY not set")
+                return _call_azure(key, model, system, user_text), label
             return _call_openai_compatible(base, key, model, system, user_text), label
         except Exception as e:  # try the next model on any failure
             logger.warning(f"AI model {label} failed: {e}")
