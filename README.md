@@ -34,7 +34,13 @@ Set `AI_MODELS` to a comma-separated list of `provider:model` entries. They are 
 AI_MODELS=anthropic:claude-opus-5-5,groq:llama-3.3-70b-versatile,gemini:gemini-2.5-flash
 ```
 
-Built-in providers, each with its own key variable: `anthropic` (`ANTHROPIC_API_KEY`), `openai`, `groq`, `gemini`, `openrouter`, `deepseek`, `mistral`, `together` (`<PROVIDER>_API_KEY`).
+Built-in providers only need their API key in Vercel:
+
+| Provider | Key variable |
+|---|---|
+| `anthropic` | `ANTHROPIC_API_KEY` |
+| `azure` | `AZURE_OPENAI_API_KEY` + `AZURE_OPENAI_ENDPOINT` (see below) |
+| `openai`, `gemini`, `groq`, `openrouter`, `deepseek`, `mistral`, `together`, `xai`, `perplexity`, `cerebras`, `fireworks`, `huggingface`, `nvidia`, `cohere` | `<PROVIDER>_API_KEY`, e.g. `XAI_API_KEY` |
 
 **Azure OpenAI**: set `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_API_KEY` and optionally `AZURE_OPENAI_API_VERSION` (default `2024-12-01-preview`). Then use your **deployment name** as the model, e.g. `AI_MODELS=azure:IPMgpt-4`.
 
@@ -43,7 +49,16 @@ Built-in providers, each with its own key variable: `anthropic` (`ANTHROPIC_API_
 ```
 AI_MODELS=ollama:llama3
 OLLAMA_BASE_URL=https://my-ollama.example.com/v1
+OLLAMA_API_KEY=...
+# only if the provider wants the key in a header other than "Authorization: Bearer":
+OLLAMA_API_KEY_HEADER=api-key
 ```
+
+`<NAME>_BASE_URL` also overrides a built-in provider's URL, e.g. `OPENAI_BASE_URL` for a proxy.
+
+So adding a model means:
+- **A provider you already have a key for:** just use it, in Vercel (`AI_MODELS`) or in chat (`/model provider:model`).
+- **A new provider:** add its key (and base URL if it isn't built-in) in Vercel and redeploy. After that, you can switch to it from chat.
 
 To use different models for your own chat than for replying to others, set `OWNER_AI_MODELS`.
 
@@ -57,6 +72,7 @@ You can change models from your chat with the bot, with no redeploy. These are t
 | `/model groq:llama-3.3-70b-versatile` | Use this for both replies to others and your chat |
 | `/model others anthropic:claude-haiku-5-5` | Only for replies to others |
 | `/model me gemini:gemini-2.5-flash,groq:llama-3.3-70b-versatile` | Only for your chat (with a fallback) |
+| `/model test` | Ping every configured model and report which ones work |
 | `/model reset` | Back to `AI_MODELS` / `OWNER_AI_MODELS` from Vercel |
 
 The provider's API key must already be set in Vercel. The bot refuses a model whose key is missing. The choice is saved in the same pinned settings message as the mode. Cheaper Claude option: `anthropic:claude-haiku-5-5`.
